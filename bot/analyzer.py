@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -17,6 +18,10 @@ from bot.logger import setup_logger
 from config import config
 
 logger = setup_logger(__name__)
+
+# Rate limiter: stay under Anthropic API limits
+_MIN_INTERVAL = 15.0  # seconds between requests (= 4 req/min, safely under 5/min limit)
+_last_request_time = 0.0
 
 _PROMPT_PATH = os.path.join(
     os.path.dirname(os.path.dirname(__file__)), "prompts", "v7_market_analysis.txt"
@@ -53,6 +58,14 @@ class MarketAnalyzer:
             volume=volume,
         )
         try:
+            # Rate limiting: wait until enough time has passed since last request
+            global _last_request_time
+            now = time.monotonic()
+            elapsed = now - _last_request_time
+            if elapsed < _MIN_INTERVAL:
+                await asyncio.sleep(_MIN_INTERVAL - elapsed)
+            _last_request_time = time.monotonic()
+
             loop = asyncio.get_running_loop()
             response = await loop.run_in_executor(
                 None,

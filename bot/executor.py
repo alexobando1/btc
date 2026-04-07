@@ -96,9 +96,10 @@ class Executor:
                     BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
                 ),
             )
+            logger.info("Balance API raw response: %s", result)
             raw_bal = result.get("balance", "0") if isinstance(result, dict) else "0"
             balance = float(raw_bal) / 1e6
-            logger.info("Polymarket USDC balance: $%.2f", balance)
+            logger.info("Polymarket USDC balance: $%.2f (raw: %s)", balance, raw_bal)
             return balance
         except Exception as exc:
             logger.error("Balance check failed: %s", exc)

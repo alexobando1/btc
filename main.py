@@ -74,8 +74,13 @@ async def run_scan_cycle(
     edges_found = 0
     trades_placed = 0
 
-    # Analyse concurrently (up to 10 at a time)
-    semaphore = asyncio.Semaphore(10)
+    # Limit to top 25 markets by volume to stay within API rate limits
+    # (Anthropic free tier = 5 req/min; we send ~4/min with rate limiting)
+    markets_to_analyse = sorted(markets, key=lambda m: m.volume, reverse=True)[:25]
+    logger.info("Analysing top %d markets (of %d total) by volume", len(markets_to_analyse), len(markets))
+
+    # Analyse sequentially to respect rate limits
+    semaphore = asyncio.Semaphore(1)
 
     async def analyse_one(market):
         nonlocal edges_found, trades_placed
@@ -128,7 +133,7 @@ async def run_scan_cycle(
             except Exception as exc:
                 logger.error("Error processing market '%s': %s", market.question[:50], exc)
 
-    await asyncio.gather(*[analyse_one(m) for m in markets])
+    await asyncio.gather(*[analyse_one(m) for m in markets_to_analyse])
 
     elapsed = time.monotonic() - cycle_start
     next_scan_min = config.SCAN_INTERVAL_SECONDS // 60

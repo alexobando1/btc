@@ -17,13 +17,13 @@ Instructions:
 
 Return ONLY valid JSON in this exact format — no prose, no markdown fences:
 
-{
+{{
   "probability": 0.XX,
   "confidence": "high" | "medium" | "low",
   "base_rate": 0.XX,
   "reasoning": "Two or three concise sentences explaining your estimate.",
   "edge": 0.XX
-}
+}}
 
 Where:
   - "probability"  is your true probability estimate (0.0 – 1.0)

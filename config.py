@@ -32,10 +32,10 @@ class Config:
     KELLY_FRACTION: float = float(os.getenv("KELLY_FRACTION", "0.25"))
     MAX_SLIPPAGE: float = float(os.getenv("MAX_SLIPPAGE", "0.02"))
     MAX_POSITION_USD: float = float(os.getenv("MAX_POSITION_USD", "200"))
-    SCAN_INTERVAL_SECONDS: int = int(os.getenv("SCAN_INTERVAL_SECONDS", "1800"))
+    SCAN_INTERVAL_SECONDS: int = int(os.getenv("SCAN_INTERVAL_SECONDS", "300"))
 
     # Minimum liquidity volume to consider a market ($)
-    MIN_MARKET_VOLUME: float = 50_000
+    MIN_MARKET_VOLUME: float = 10_000
 
     # Database
     DB_PATH: str = os.getenv("DB_PATH", "positions.db")

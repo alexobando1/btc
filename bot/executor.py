@@ -23,26 +23,12 @@ from config import config
 
 logger = setup_logger(__name__)
 
-# Minimal ERC-20 ABI for balanceOf
-_ERC20_ABI = [
-    {
-        "constant": True,
-        "inputs": [{"name": "_owner", "type": "address"}],
-        "name": "balanceOf",
-        "outputs": [{"name": "balance", "type": "uint256"}],
-        "type": "function",
-    }
-]
-
 
 class Executor:
     def __init__(self, tracker: PositionTracker) -> None:
         self._tracker = tracker
-        self._w3 = Web3(Web3.HTTPProvider(config.POLYGON_RPC_URL))
-        self._usdc = self._w3.eth.contract(
-            address=Web3.to_checksum_address(config.USDC_CONTRACT),
-            abi=_ERC20_ABI,
-        )
+        # Web3 only needed for address derivation (local op, no RPC call)
+        self._w3 = Web3()
 
         creds = None
         if config.POLYMARKET_API_KEY:
@@ -68,16 +54,25 @@ class Executor:
             return "0x0000000000000000000000000000000000000000"
 
     async def get_usdc_balance(self) -> float:
-        """Return on-chain USDC.e balance in USD (6 decimals)."""
+        """Return Polymarket USDC trading balance via CLOB API.
+
+        Funds deposited into Polymarket are held in their proxy contracts,
+        not as raw USDC in the EOA — so on-chain balance would always be 0.
+        The CLOB balance-allowance endpoint returns the actual tradeable amount.
+        """
+        from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
         loop = asyncio.get_event_loop()
         try:
-            raw = await loop.run_in_executor(
+            result = await loop.run_in_executor(
                 None,
-                lambda: self._usdc.functions.balanceOf(
-                    Web3.to_checksum_address(self._wallet)
-                ).call(),
+                lambda: self._clob.get_balance_allowance(
+                    BalanceAllowanceParams(asset_type=AssetType.USDC)
+                ),
             )
-            return raw / 1e6
+            raw_bal = result.get("balance", "0") if isinstance(result, dict) else "0"
+            balance = float(raw_bal) / 1e6
+            logger.info("Polymarket USDC balance: $%.2f", balance)
+            return balance
         except Exception as exc:
             logger.error("Balance check failed: %s", exc)
             return 0.0

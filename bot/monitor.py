@@ -28,10 +28,16 @@ class TelegramMonitor:
         self._enabled = bool(config.TELEGRAM_BOT_TOKEN and config.TELEGRAM_CHAT_ID)
 
         if self._enabled:
-            self._bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
-            self._dp = Dispatcher()
-            self._register_handlers()
-            logger.info("TelegramMonitor enabled (chat_id: %s)", config.TELEGRAM_CHAT_ID)
+            try:
+                self._bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
+                self._dp = Dispatcher()
+                self._register_handlers()
+                logger.info("TelegramMonitor enabled (chat_id: %s)", config.TELEGRAM_CHAT_ID)
+            except Exception as exc:
+                logger.warning("Telegram init failed (%s) – alerts disabled", exc)
+                self._enabled = False
+                self._bot = None
+                self._dp = None
         else:
             logger.warning("Telegram not configured – alerts disabled")
 

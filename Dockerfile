@@ -1,29 +1,29 @@
-# ── Stage 1: Build React frontend ───────────────────────────────────────────
-FROM node:20-slim AS frontend-build
-WORKDIR /app/frontend
-
-COPY frontend/package*.json ./
-RUN npm ci
-
-COPY frontend/ ./
-RUN npm run build
-
-# ── Stage 2: Python runtime + FastAPI ───────────────────────────────────────
-# The dashboard API only uses fastapi, uvicorn, aiosqlite, python-dotenv.
-# No compilation needed — all pure Python or pre-built wheels.
 FROM python:3.11-slim
 
 WORKDIR /app
 
+# ── 1. Python deps (pure Python only, no compilation) ─────────────────────
 COPY requirements-api.txt ./
 RUN pip install --no-cache-dir -r requirements-api.txt
 
-# Copy source (api + config only — bot deps not needed for the dashboard)
+# ── 2. Node.js (install, build frontend, then remove) ─────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY frontend/package*.json ./frontend/
+RUN cd frontend && npm ci --prefer-offline
+
+COPY frontend/ ./frontend/
+RUN cd frontend && npm run build
+
+# Remove Node + node_modules to free space
+RUN apt-get purge -y nodejs && apt-get autoremove -y && rm -rf frontend/node_modules
+
+# ── 3. App source ──────────────────────────────────────────────────────────
 COPY api/      ./api/
 COPY config.py ./
-
-# Copy built React app
-COPY --from=frontend-build /app/frontend/dist ./frontend/dist
 
 ENV PORT=8000
 EXPOSE $PORT

@@ -1,12 +1,29 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
-import type { Position, Market, Stats, FeedItem, PnLPoint, WSEvent } from '../types'
+import type { Position, Market, Stats, FeedItem, PnLPoint } from '../types'
 
-const API = import.meta.env.VITE_API_URL ?? ''
+const API = (import.meta as unknown as { env: Record<string, string> }).env?.VITE_API_URL ?? ''
 
 async function apiFetch<T>(path: string): Promise<T> {
   const res = await fetch(`${API}${path}`)
   if (!res.ok) throw new Error(`API ${path} → ${res.status}`)
   return res.json()
+}
+
+interface WSEvent {
+  event: 'market_analysed' | 'scan_complete' | 'trade_executed'
+  data: Record<string, unknown>
+}
+
+interface ScannedMarket {
+  question: string
+  yes_price: number
+  no_price: number
+  volume: number
+  ev: number
+  ai_prob: number
+  confidence: 'high' | 'medium' | 'low'
+  index: number
+  total: number
 }
 
 export function useBot() {
@@ -19,7 +36,7 @@ export function useBot() {
   const [scanning, setScanning] = useState(false)
   const [scanProgress, setScanProgress] = useState(0)
   const [activeMarket, setActiveMarket] = useState<Market | null>(null)
-  const [lastTrade, setLastTrade] = useState<WSEvent['data'] | null>(null)
+  const [lastTrade, setLastTrade] = useState<Record<string, unknown> | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
 
   const loadAll = useCallback(async () => {
@@ -61,31 +78,43 @@ export function useBot() {
         setConnected(false)
         setTimeout(connect, 3000)
       }
-      ws.onmessage = (evt) => {
-        const msg: WSEvent = JSON.parse(evt.data)
+      ws.onmessage = (evt: MessageEvent<string>) => {
+        const msg = JSON.parse(evt.data) as WSEvent
         if (msg.event === 'market_analysed') {
-          const d = msg.data as Market & { index: number; total: number }
+          const d = msg.data as unknown as ScannedMarket
           setScanning(true)
           setScanProgress(Math.round((d.index / d.total) * 100))
-          setActiveMarket(d)
+          setActiveMarket({
+            question: d.question,
+            yes_price: d.yes_price,
+            no_price: d.no_price,
+            volume: d.volume,
+            ev: d.ev,
+            ai_prob: d.ai_prob,
+            confidence: d.confidence,
+          })
         } else if (msg.event === 'scan_complete') {
           setScanning(false)
           setScanProgress(100)
           setActiveMarket(null)
-          const d = msg.data as { markets_scanned: number; edges_found: number }
+          const scanned = Number(msg.data.markets_scanned ?? 0)
+          const edges = Number(msg.data.edges_found ?? 0)
           setFeed(prev => [{
             type: 'scan',
             text: 'SCAN COMPLETE',
-            detail: `${d.markets_scanned} markets | ${d.edges_found} edges`,
+            detail: `${scanned} markets | ${edges} edges`,
             time: Date.now() / 1000,
           }, ...prev.slice(0, 49)])
         } else if (msg.event === 'trade_executed') {
           setLastTrade(msg.data)
-          const d = msg.data as { question: string; side: string; size_usd: number; ev: number }
+          const side = String(msg.data.side ?? '')
+          const question = String(msg.data.question ?? '')
+          const size = Number(msg.data.size_usd ?? 0)
+          const ev = Number(msg.data.ev ?? 0)
           setFeed(prev => [{
             type: 'trade',
-            text: `BUY ${d.side} – ${d.question}`,
-            detail: `$${d.size_usd.toFixed(0)} | EV ${(d.ev * 100).toFixed(1)}%`,
+            text: `BUY ${side} – ${question}`,
+            detail: `$${size.toFixed(0)} | EV ${(ev * 100).toFixed(1)}%`,
             time: Date.now() / 1000,
           }, ...prev.slice(0, 49)])
           loadAll()

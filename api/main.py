@@ -38,10 +38,19 @@ async def fetch_real_markets() -> list[dict]:
         return _market_cache
     logger.info("Fetching markets from Polymarket CLOB…")
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.get(f"{CLOB_URL}/markets", params={"active": "true", "limit": 100})
-            resp.raise_for_status()
-            raw = resp.json().get("data", [])
+        all_raw: list[dict] = []
+        cursor = "MA=="
+        async with httpx.AsyncClient(timeout=30) as client:
+            for _ in range(10):
+                resp = await client.get(f"{CLOB_URL}/markets", params={"next_cursor": cursor})
+                resp.raise_for_status()
+                body = resp.json()
+                all_raw.extend(body.get("data", []))
+                next_cur = body.get("next_cursor", "")
+                if not next_cur or next_cur in ("", "LTE=", cursor):
+                    break
+                cursor = next_cur
+        raw = all_raw
         processed: list[dict] = []
         for m in raw:
             tokens = m.get("tokens", [])

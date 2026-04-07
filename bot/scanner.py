@@ -1,6 +1,7 @@
 """
 Layer 1 – Data & Market Access
-Fetches active markets from the Polymarket CLOB API via py-clob-client.
+Fetches active markets directly from Polymarket CLOB REST API via httpx.
+Uses cursor-based pagination to get all markets.
 """
 from __future__ import annotations
 
@@ -8,6 +9,7 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import Optional
 
+import httpx
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import ApiCreds
 
@@ -32,7 +34,6 @@ class Market:
     question: str
     volume: float
     tokens: list[MarketToken] = field(default_factory=list)
-    # Derived after fetch
     yes_price: float = 0.0
     no_price: float = 0.0
     spread: float = 0.0
@@ -51,7 +52,7 @@ class MarketScanner:
                 api_secret=config.POLYMARKET_API_SECRET,
                 api_passphrase=config.POLYMARKET_API_PASSPHRASE,
             )
-        self._client = ClobClient(
+        self._clob = ClobClient(
             host=CLOB_HOST,
             chain_id=137,
             key=config.POLYMARKET_PRIVATE_KEY or None,
@@ -60,11 +61,11 @@ class MarketScanner:
         logger.info("MarketScanner initialised (CLOB host: %s)", CLOB_HOST)
 
     async def fetch_markets(self, min_volume: float = config.MIN_MARKET_VOLUME) -> list[Market]:
-        """Return active binary markets above *min_volume* USD."""
+        """Return active binary markets above *min_volume* USD using direct REST calls."""
         logger.info("Fetching active markets (min volume $%.0f)…", min_volume)
 
-        loop = asyncio.get_event_loop()
-        raw_markets = await loop.run_in_executor(None, self._fetch_sync)
+        raw_markets = await self._fetch_all_pages()
+        logger.info("Raw markets fetched from CLOB: %d", len(raw_markets))
 
         markets: list[Market] = []
         for raw in raw_markets:
@@ -86,19 +87,17 @@ class MarketScanner:
                     for t in tokens
                 ]
 
-                yes_token = next(
-                    (t for t in market_tokens if t.outcome.upper() == "YES"), None
-                )
-                no_token = next(
-                    (t for t in market_tokens if t.outcome.upper() == "NO"), None
-                )
+                yes_token = next((t for t in market_tokens if t.outcome.upper() == "YES"), None)
+                no_token  = next((t for t in market_tokens if t.outcome.upper() == "NO"),  None)
 
                 if not yes_token or not no_token:
+                    continue
+                if yes_token.price <= 0 or no_token.price <= 0:
                     continue
 
                 spread = abs(yes_token.price + no_token.price - 1.0)
 
-                m = Market(
+                markets.append(Market(
                     condition_id=raw.get("condition_id", ""),
                     question=raw.get("question", ""),
                     volume=volume,
@@ -106,34 +105,51 @@ class MarketScanner:
                     yes_price=yes_token.price,
                     no_price=no_token.price,
                     spread=spread,
-                )
-                markets.append(m)
+                ))
             except Exception as exc:
-                logger.warning("Skipping malformed market entry: %s", exc)
+                logger.warning("Skipping malformed market: %s", exc)
 
         markets.sort(key=lambda m: m.volume, reverse=True)
         logger.info("Loaded %d qualifying markets", len(markets))
         return markets
 
-    def _fetch_sync(self) -> list[dict]:
-        """Synchronous CLOB call wrapped for executor."""
-        try:
-            resp = self._client.get_markets()
-            # py-clob-client returns a dict with a 'data' key
-            if isinstance(resp, dict):
-                return resp.get("data", [])
-            return list(resp) if resp else []
-        except Exception as exc:
-            logger.error("CLOB fetch_markets failed: %s", exc)
-            return []
+    async def _fetch_all_pages(self) -> list[dict]:
+        """Paginate through CLOB /markets using cursor until exhausted."""
+        all_markets: list[dict] = []
+        cursor = "MA=="   # base64("0") — starting cursor for Polymarket pagination
+        max_pages = 10
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            for page in range(max_pages):
+                try:
+                    resp = await client.get(
+                        f"{CLOB_HOST}/markets",
+                        params={"next_cursor": cursor},
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+
+                    page_markets = data.get("data", [])
+                    all_markets.extend(page_markets)
+                    logger.info("CLOB page %d: %d markets", page + 1, len(page_markets))
+
+                    next_cursor = data.get("next_cursor", "")
+                    # LTE== is the sentinel "end of results" cursor
+                    if not next_cursor or next_cursor in ("", "LTE=", cursor):
+                        break
+                    cursor = next_cursor
+                except Exception as exc:
+                    logger.error("CLOB page fetch error (page %d): %s", page + 1, exc)
+                    break
+
+        return all_markets
 
     async def get_orderbook(self, token_id: str) -> Optional[dict]:
-        """Fetch full orderbook for a single token."""
-        loop = asyncio.get_event_loop()
         try:
+            loop = asyncio.get_event_loop()
             return await loop.run_in_executor(
-                None, lambda: self._client.get_order_book(token_id)
+                None, lambda: self._clob.get_order_book(token_id)
             )
         except Exception as exc:
-            logger.warning("Failed to fetch orderbook for %s: %s", token_id, exc)
+            logger.warning("Orderbook fetch failed for %s: %s", token_id, exc)
             return None

@@ -256,26 +256,18 @@ async def get_balance():
         def _read():
             from py_clob_client.client import ClobClient
             from py_clob_client.clob_types import ApiCreds, BalanceAllowanceParams, AssetType
-            w3 = Web3(Web3.HTTPProvider("https://polygon-rpc.com"))
+            # Derive wallet address (local op, no RPC needed)
+            w3 = Web3()
             acct = w3.eth.account.from_key(pk)
             wallet = acct.address
             # Polymarket holds USDC internally — read via CLOB API balance endpoint
             if api_key and api_secret and api_passphrase:
-                try:
-                    creds = ApiCreds(api_key=api_key, api_secret=api_secret, api_passphrase=api_passphrase)
-                    client = ClobClient(host=CLOB_URL, chain_id=137, key=pk, creds=creds)
-                    result = client.get_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
-                    # balance is a string in micro-USDC (6 decimals)
-                    raw_bal = result.get("balance", "0") if isinstance(result, dict) else "0"
-                    return wallet, float(raw_bal) / 1e6
-                except Exception as exc:
-                    logger.warning("CLOB balance failed, falling back to on-chain: %s", exc)
-            # Fallback: read raw USDC from EOA (may be 0 if all funds are deposited)
-            usdc = w3.eth.contract(
-                address=Web3.to_checksum_address(USDC_CONTRACT), abi=_ERC20_ABI
-            )
-            raw = usdc.functions.balanceOf(Web3.to_checksum_address(wallet)).call()
-            return wallet, raw / 1e6
+                creds = ApiCreds(api_key=api_key, api_secret=api_secret, api_passphrase=api_passphrase)
+                client = ClobClient(host=CLOB_URL, chain_id=137, key=pk, creds=creds)
+                result = client.get_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
+                raw_bal = result.get("balance", "0") if isinstance(result, dict) else "0"
+                return wallet, float(raw_bal) / 1e6
+            return wallet, 0.0
         wallet, balance = await loop.run_in_executor(None, _read)
         return {"wallet": wallet, "usdc_balance": round(balance, 2)}
     except Exception as exc:

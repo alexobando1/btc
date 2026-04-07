@@ -252,24 +252,14 @@ async def get_balance():
         loop = asyncio.get_event_loop()
         def _read():
             from py_clob_client.client import ClobClient
-            from py_clob_client.clob_types import ApiCreds, BalanceAllowanceParams, AssetType
+            from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
             # Derive wallet address (local op, no RPC needed)
             w3 = Web3()
             acct = w3.eth.account.from_key(pk)
             wallet = acct.address
             # Auto-derive CLOB API credentials from private key
             bare_client = ClobClient(host=CLOB_URL, chain_id=137, key=pk)
-            resp = bare_client.create_or_derive_api_creds()
-            if isinstance(resp, ApiCreds):
-                creds = resp
-            elif isinstance(resp, dict):
-                creds = ApiCreds(
-                    api_key=resp.get("apiKey", resp.get("api_key", "")),
-                    api_secret=resp.get("secret", resp.get("api_secret", "")),
-                    api_passphrase=resp.get("passphrase", resp.get("api_passphrase", "")),
-                )
-            else:
-                return wallet, 0.0
+            creds = bare_client.create_or_derive_api_creds()
             client = ClobClient(host=CLOB_URL, chain_id=137, key=pk, creds=creds)
             result = client.get_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
             raw_bal = result.get("balance", "0") if isinstance(result, dict) else "0"

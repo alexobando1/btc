@@ -5,6 +5,7 @@ Prompt is loaded from prompts/v7_market_analysis.txt.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from dataclasses import dataclass
@@ -52,10 +53,14 @@ class MarketAnalyzer:
             volume=volume,
         )
         try:
-            response = self._client.messages.create(
-                model=config.CLAUDE_MODEL,
-                max_tokens=512,
-                messages=[{"role": "user", "content": prompt}],
+            loop = asyncio.get_running_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: self._client.messages.create(
+                    model=config.CLAUDE_MODEL,
+                    max_tokens=512,
+                    messages=[{"role": "user", "content": prompt}],
+                ),
             )
             raw = response.content[0].text.strip()
             return self._parse(raw, yes_price)

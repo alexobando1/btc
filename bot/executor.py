@@ -13,6 +13,7 @@ from typing import Optional
 
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import ApiCreds, OrderArgs, OrderType
+from py_clob_client.order_builder.constants import BUY
 from web3 import Web3
 
 from bot.logger import setup_logger
@@ -53,25 +54,13 @@ class Executor:
     def _derive_or_create_creds(self) -> ApiCreds | None:
         """Derive CLOB API credentials from the private key.
 
-        This calls the Polymarket CLOB API to create or retrieve existing
+        Calls the Polymarket CLOB API to create or retrieve existing
         credentials tied to the wallet. No manual API key management needed.
         """
         try:
-            resp = self._clob.create_or_derive_api_creds()
-            # resp may be ApiCreds directly or a dict
-            if isinstance(resp, ApiCreds):
-                logger.info("CLOB API credentials derived successfully")
-                return resp
-            if isinstance(resp, dict):
-                creds = ApiCreds(
-                    api_key=resp.get("apiKey", resp.get("api_key", "")),
-                    api_secret=resp.get("secret", resp.get("api_secret", "")),
-                    api_passphrase=resp.get("passphrase", resp.get("api_passphrase", "")),
-                )
-                logger.info("CLOB API credentials derived successfully (api_key: %s…)", creds.api_key[:12])
-                return creds
-            logger.warning("Unexpected creds response type: %s", type(resp))
-            return None
+            creds = self._clob.create_or_derive_api_creds()
+            logger.info("CLOB API credentials derived successfully (api_key: %s…)", creds.api_key[:12])
+            return creds
         except Exception as exc:
             logger.error("Failed to derive CLOB API credentials: %s", exc)
             # Fall back to env var creds if derivation fails
@@ -99,7 +88,7 @@ class Executor:
         The CLOB balance-allowance endpoint returns the actual tradeable amount.
         """
         from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         try:
             result = await loop.run_in_executor(
                 None,
@@ -160,11 +149,12 @@ class Executor:
             return None
 
         # 5. Place GTC order
+        # py_clob_client expects "BUY"/"SELL", not "YES"/"NO".
+        # We always BUY the correct outcome token (YES token or NO token).
         order_id = await self._place_gtc_order(
             token_id=token.token_id,
             price=decision.market_price,
             size_usd=decision.position_size_usd,
-            side=decision.side,
         )
         if not order_id:
             return None
@@ -190,9 +180,8 @@ class Executor:
         token_id: str,
         price: float,
         size_usd: float,
-        side: str,
     ) -> Optional[str]:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         try:
             # size in shares = USD / price
             size_shares = size_usd / price if price > 0 else 0
@@ -201,7 +190,7 @@ class Executor:
                 token_id=token_id,
                 price=round(price, 4),
                 size=round(size_shares, 2),
-                side=side,
+                side=BUY,
             )
             resp = await loop.run_in_executor(
                 None,
@@ -209,8 +198,8 @@ class Executor:
             )
             order_id = resp.get("orderID", "") if isinstance(resp, dict) else str(resp)
             logger.info(
-                "GTC order placed: %s %s @ %.4f, size $%.2f | order_id=%s",
-                side, token_id[:12], price, size_usd, order_id,
+                "GTC order placed: BUY %s @ %.4f, size $%.2f | order_id=%s",
+                token_id[:12], price, size_usd, order_id,
             )
             return order_id
         except Exception as exc:

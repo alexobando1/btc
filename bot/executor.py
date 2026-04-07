@@ -31,11 +31,16 @@ class Executor:
         # Web3 only needed for address derivation (local op, no RPC call)
         self._w3 = Web3()
 
+        # Polymarket uses proxy wallets: signature_type=1 (POLY_PROXY)
+        # This tells the CLOB API to use the proxy wallet for balance/trading
+        POLY_PROXY = 1
+
         # Start with a bare client (no creds) — we'll derive them below
         self._clob = ClobClient(
             host="https://clob.polymarket.com",
             chain_id=137,
             key=config.POLYMARKET_PRIVATE_KEY,
+            signature_type=POLY_PROXY,
         )
         self._wallet = self._derive_address()
 
@@ -47,6 +52,7 @@ class Executor:
                 chain_id=137,
                 key=config.POLYMARKET_PRIVATE_KEY,
                 creds=creds,
+                signature_type=POLY_PROXY,
             )
 
         logger.info("Executor initialised (wallet: %s)", self._wallet)

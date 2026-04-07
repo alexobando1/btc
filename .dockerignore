@@ -1,0 +1,12 @@
+.git
+.env
+*.db
+*.db-journal
+logs/
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+frontend/node_modules/
+frontend/.vite/

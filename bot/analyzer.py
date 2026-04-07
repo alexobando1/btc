@@ -68,12 +68,16 @@ class MarketAnalyzer:
 
     def _parse(self, raw: str, yes_price: float) -> Optional[Analysis]:
         try:
-            # Strip markdown code fences that Claude sometimes adds
+            import re
             clean = raw.strip()
-            if clean.startswith("```"):
+            # Strategy 1: extract JSON object with regex (handles prose + fences)
+            match = re.search(r'\{[^{}]*"probability"[^{}]*\}', clean, re.DOTALL)
+            if match:
+                clean = match.group(0)
+            elif clean.startswith("```"):
+                # Strategy 2: strip markdown fences
                 lines = clean.split("\n")
-                # Remove first line (```json or ```) and last line (```)
-                inner = lines[1:-1] if lines[-1].strip() == "```" else lines[1:]
+                inner = lines[1:-1] if lines[-1].strip().startswith("```") else lines[1:]
                 clean = "\n".join(inner).strip()
             data = json.loads(clean)
             probability = float(data["probability"])

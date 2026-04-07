@@ -127,7 +127,6 @@ async def run_scan_cycle(
 
             except Exception as exc:
                 logger.error("Error processing market '%s': %s", market.question[:50], exc)
-                await monitor.alert_error(f"market analysis: {market.question[:40]}", exc)
 
     await asyncio.gather(*[analyse_one(m) for m in markets])
 

@@ -264,7 +264,7 @@ async def get_balance():
                 try:
                     creds = ApiCreds(api_key=api_key, api_secret=api_secret, api_passphrase=api_passphrase)
                     client = ClobClient(host=CLOB_URL, chain_id=137, key=pk, creds=creds)
-                    result = client.get_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.USDC))
+                    result = client.get_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
                     # balance is a string in micro-USDC (6 decimals)
                     raw_bal = result.get("balance", "0") if isinstance(result, dict) else "0"
                     return wallet, float(raw_bal) / 1e6

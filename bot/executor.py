@@ -66,7 +66,7 @@ class Executor:
             result = await loop.run_in_executor(
                 None,
                 lambda: self._clob.get_balance_allowance(
-                    BalanceAllowanceParams(asset_type=AssetType.USDC)
+                    BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
                 ),
             )
             raw_bal = result.get("balance", "0") if isinstance(result, dict) else "0"

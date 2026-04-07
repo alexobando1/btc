@@ -1,12 +1,13 @@
 """
 Polymarket Bot Dashboard API
 FastAPI backend — serves REST + WebSocket + React SPA static files.
+Fetches REAL markets from Polymarket CLOB. Falls back to mock only on error.
 """
 from __future__ import annotations
 
 import asyncio
 import json
-import math
+import logging
 import os
 import random
 import time
@@ -15,74 +16,94 @@ from pathlib import Path
 from typing import Any
 
 import aiosqlite
+import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+logger = logging.getLogger("api")
+logging.basicConfig(level=logging.INFO)
+
 DB_PATH = os.getenv("DB_PATH", "positions.db")
 FRONTEND_DIST = Path(__file__).parent.parent / "frontend" / "dist"
+CLOB_URL = "https://clob.polymarket.com"
 
 # ---------------------------------------------------------------------------
-# Mock data (shown when DB is empty / bot not yet running)
+# Real market cache
 # ---------------------------------------------------------------------------
-MOCK_MARKETS = [
-    {"question": "Will Fed cut rates in June 2026?", "yes_price": 0.42, "no_price": 0.58, "volume": 1_200_000, "ev": 0.183, "ai_prob": 0.61, "confidence": "high"},
-    {"question": "BTC above $95K by March 31?", "yes_price": 0.35, "no_price": 0.65, "volume": 890_000, "ev": 0.081, "ai_prob": 0.44, "confidence": "medium"},
-    {"question": "NYC temp > 60F on March 20?", "yes_price": 0.28, "no_price": 0.72, "volume": 340_000, "ev": 0.031, "ai_prob": 0.31, "confidence": "low"},
-    {"question": "Trump pardons before April?", "yes_price": 0.61, "no_price": 0.39, "volume": 2_100_000, "ev": 0.143, "ai_prob": 0.74, "confidence": "high"},
-    {"question": "ETH flips BNB market cap?", "yes_price": 0.15, "no_price": 0.85, "volume": 156_000, "ev": -0.02, "ai_prob": 0.14, "confidence": "low"},
-    {"question": "SpaceX Starship orbital by Q2 2026?", "yes_price": 0.55, "no_price": 0.45, "volume": 670_000, "ev": 0.092, "ai_prob": 0.67, "confidence": "medium"},
-    {"question": "Apple releases AR glasses in 2026?", "yes_price": 0.38, "no_price": 0.62, "volume": 420_000, "ev": -0.01, "ai_prob": 0.37, "confidence": "low"},
-    {"question": "Inflation below 2% in 2026?", "yes_price": 0.29, "no_price": 0.71, "volume": 980_000, "ev": 0.073, "ai_prob": 0.38, "confidence": "medium"},
+_market_cache: list[dict] = []
+_market_cache_ts: float = 0
+_CACHE_TTL = 300  # 5 minutes
+
+FALLBACK_MARKETS = [
+    {"question": "Will Fed cut rates in June 2026?", "yes_price": 0.42, "no_price": 0.58,
+     "volume": 1_200_000, "ev": 0.18, "ai_prob": 0.61, "confidence": "high"},
+    {"question": "BTC above $95K by March 31?", "yes_price": 0.35, "no_price": 0.65,
+     "volume": 890_000, "ev": 0.08, "ai_prob": 0.44, "confidence": "medium"},
+    {"question": "Trump pardons before April?", "yes_price": 0.61, "no_price": 0.39,
+     "volume": 2_100_000, "ev": 0.14, "ai_prob": 0.74, "confidence": "high"},
+    {"question": "ETH flips BNB market cap?", "yes_price": 0.15, "no_price": 0.85,
+     "volume": 156_000, "ev": -0.02, "ai_prob": 0.14, "confidence": "low"},
+    {"question": "SpaceX Starship orbital by Q2 2026?", "yes_price": 0.55, "no_price": 0.45,
+     "volume": 670_000, "ev": 0.09, "ai_prob": 0.67, "confidence": "medium"},
 ]
 
-MOCK_POSITIONS = [
-    {
-        "id": 1, "question": "Will Fed cut rates in June 2026?", "side": "YES",
-        "entry_price": 0.42, "current_price": 0.51, "size_usd": 112.0,
-        "timestamp": time.time() - 3600 * 6, "closed": False,
-    },
-    {
-        "id": 2, "question": "Trump pardons before April?", "side": "YES",
-        "entry_price": 0.61, "current_price": 0.68, "size_usd": 98.0,
-        "timestamp": time.time() - 3600 * 2, "closed": False,
-    },
-    {
-        "id": 3, "question": "SpaceX Starship orbital by Q2 2026?", "side": "YES",
-        "entry_price": 0.55, "current_price": 0.58, "size_usd": 60.0,
-        "timestamp": time.time() - 3600 * 1, "closed": False,
-    },
-]
 
-MOCK_CLOSED = [
-    {
-        "id": 4, "question": "BTC above $80K by Jan 31?", "side": "YES",
-        "entry_price": 0.45, "exit_price": 0.89, "size_usd": 80.0,
-        "timestamp": time.time() - 3600 * 48, "closed": True,
-    },
-    {
-        "id": 5, "question": "ETH staking yield > 5%?", "side": "NO",
-        "entry_price": 0.32, "exit_price": 0.11, "size_usd": 45.0,
-        "timestamp": time.time() - 3600 * 72, "closed": True,
-    },
-    {
-        "id": 6, "question": "Solana above $200 by Feb?", "side": "YES",
-        "entry_price": 0.61, "exit_price": 0.91, "size_usd": 55.0,
-        "timestamp": time.time() - 3600 * 96, "closed": True,
-    },
-]
+async def fetch_real_markets() -> list[dict]:
+    global _market_cache, _market_cache_ts
+    if time.time() - _market_cache_ts < _CACHE_TTL and _market_cache:
+        return _market_cache
 
-MOCK_FEED = [
-    {"type": "trade", "text": "BUY YES – Will Fed cut rates?", "detail": "$112 @ $0.42 | EV +18.3%", "time": time.time() - 600},
-    {"type": "trade", "text": "BUY YES – Trump pardons before April?", "detail": "$98 @ $0.61 | EV +14.3%", "time": time.time() - 7200},
-    {"type": "skip", "text": "SKIP – ETH flips BNB market cap?", "detail": "Spread > 2% (low liquidity)", "time": time.time() - 7400},
-    {"type": "trade", "text": "BUY YES – SpaceX Starship orbital?", "detail": "$60 @ $0.55 | EV +9.2%", "time": time.time() - 3700},
-    {"type": "scan", "text": "SCAN COMPLETE", "detail": "53 markets | 3 edges | next in 30min", "time": time.time() - 3600},
-]
+    logger.info("Fetching real markets from Polymarket CLOB…")
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.get(
+                f"{CLOB_URL}/markets",
+                params={"active": "true", "limit": 100},
+            )
+            resp.raise_for_status()
+            raw = resp.json().get("data", [])
+
+        processed: list[dict] = []
+        for m in raw:
+            tokens = m.get("tokens", [])
+            yes_t = next((t for t in tokens if str(t.get("outcome", "")).upper() == "YES"), None)
+            no_t  = next((t for t in tokens if str(t.get("outcome", "")).upper() == "NO"),  None)
+            if not yes_t or not no_t:
+                continue
+            yes_price = float(yes_t.get("price") or 0)
+            no_price  = float(no_t.get("price") or 0)
+            volume    = float(m.get("volume") or 0)
+            if volume < 5_000 or yes_price <= 0 or no_price <= 0:
+                continue
+            # Simple edge estimate: how far market is from 50/50
+            edge = abs(yes_price - 0.5) * 0.4
+            processed.append({
+                "question":   m.get("question", ""),
+                "yes_price":  round(yes_price, 4),
+                "no_price":   round(no_price, 4),
+                "volume":     volume,
+                "ev":         round(edge, 3),
+                "ai_prob":    round(yes_price, 3),  # placeholder until bot runs
+                "confidence": "medium",
+                "condition_id": m.get("condition_id", ""),
+            })
+
+        processed.sort(key=lambda x: x["volume"], reverse=True)
+        _market_cache = processed[:60]
+        _market_cache_ts = time.time()
+        logger.info("Cached %d real markets", len(_market_cache))
+    except Exception as exc:
+        logger.warning("CLOB fetch failed (%s), using fallback", exc)
+        if not _market_cache:
+            _market_cache = FALLBACK_MARKETS
+
+    return _market_cache
+
 
 # ---------------------------------------------------------------------------
-# WebSocket connection manager
+# WebSocket manager
 # ---------------------------------------------------------------------------
 class WSManager:
     def __init__(self) -> None:
@@ -93,7 +114,6 @@ class WSManager:
         self.connections.append(ws)
 
     def disconnect(self, ws: WebSocket) -> None:
-        self.connections.discard(ws) if hasattr(self.connections, "discard") else None
         if ws in self.connections:
             self.connections.remove(ws)
 
@@ -111,36 +131,41 @@ class WSManager:
 ws_manager = WSManager()
 
 
-# ---------------------------------------------------------------------------
-# Simulated scan events pushed over WebSocket
-# ---------------------------------------------------------------------------
 async def simulate_scanner() -> None:
-    """Push fake scan events every 30 seconds so the UI feels alive."""
-    await asyncio.sleep(5)
+    """Push real market scan events over WebSocket every 30s."""
+    await asyncio.sleep(8)  # let startup settle
     scan_num = 0
     while True:
         scan_num += 1
-        markets = random.sample(MOCK_MARKETS, k=len(MOCK_MARKETS))
-        for i, m in enumerate(markets):
-            await asyncio.sleep(0.4)
+        markets = await fetch_real_markets()
+        if not markets:
+            await asyncio.sleep(30)
+            continue
+
+        shuffled = list(markets)
+        random.shuffle(shuffled)
+        edges = [m for m in shuffled if m.get("ev", 0) >= 0.05]
+
+        for i, m in enumerate(shuffled):
+            await asyncio.sleep(0.35)
             await ws_manager.broadcast({
                 "event": "market_analysed",
-                "data": {**m, "index": i + 1, "total": len(markets)},
+                "data": {**m, "index": i + 1, "total": len(shuffled)},
             })
 
-        edges = [m for m in markets if m["ev"] > 0.05]
         await ws_manager.broadcast({
             "event": "scan_complete",
             "data": {
-                "markets_scanned": len(markets),
+                "markets_scanned": len(shuffled),
                 "edges_found": len(edges),
                 "scan_num": scan_num,
                 "timestamp": time.time(),
             },
         })
 
-        # Occasionally fire a fake trade
-        if edges and random.random() > 0.5:
+        # Broadcast a simulated trade if real bot hasn't placed one yet
+        db_empty = not Path(DB_PATH).exists()
+        if db_empty and edges and random.random() > 0.5:
             edge = random.choice(edges)
             await asyncio.sleep(1)
             await ws_manager.broadcast({
@@ -152,6 +177,7 @@ async def simulate_scanner() -> None:
                     "size_usd": round(random.uniform(40, 150), 2),
                     "ev": edge["ev"],
                     "timestamp": time.time(),
+                    "simulated": True,
                 },
             })
 
@@ -160,6 +186,7 @@ async def simulate_scanner() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    asyncio.create_task(fetch_real_markets())  # warm cache on startup
     asyncio.create_task(simulate_scanner())
     yield
 
@@ -174,7 +201,7 @@ app.add_middleware(
 )
 
 # ---------------------------------------------------------------------------
-# DB helpers (fall back to mock if DB absent / empty)
+# DB helpers
 # ---------------------------------------------------------------------------
 async def db_get_positions() -> list[dict]:
     try:
@@ -182,10 +209,13 @@ async def db_get_positions() -> list[dict]:
             return []
         async with aiosqlite.connect(DB_PATH) as db:
             db.row_factory = aiosqlite.Row
-            async with db.execute("SELECT * FROM positions ORDER BY timestamp DESC") as cur:
+            async with db.execute(
+                "SELECT * FROM positions ORDER BY timestamp DESC"
+            ) as cur:
                 rows = await cur.fetchall()
                 return [dict(r) for r in rows]
-    except Exception:
+    except Exception as exc:
+        logger.warning("DB read failed: %s", exc)
         return []
 
 
@@ -195,80 +225,94 @@ async def db_get_positions() -> list[dict]:
 @app.get("/api/positions")
 async def get_positions():
     rows = await db_get_positions()
+    source = "live" if rows else "mock"
     if not rows:
-        return {"positions": MOCK_POSITIONS + MOCK_CLOSED, "source": "mock"}
-    return {"positions": rows, "source": "live"}
+        # Return clearly-labelled mock positions
+        rows = [
+            {"id": 1, "question": "Will Fed cut rates in June 2026?", "side": "YES",
+             "entry_price": 0.42, "current_price": 0.51, "size_usd": 112.0,
+             "timestamp": time.time() - 21600, "closed": False, "exit_price": 0},
+            {"id": 2, "question": "Trump pardons before April?", "side": "YES",
+             "entry_price": 0.61, "current_price": 0.68, "size_usd": 98.0,
+             "timestamp": time.time() - 7200, "closed": False, "exit_price": 0},
+            {"id": 3, "question": "SpaceX Starship orbital by Q2 2026?", "side": "YES",
+             "entry_price": 0.55, "current_price": 0.58, "size_usd": 60.0,
+             "timestamp": time.time() - 3600, "closed": False, "exit_price": 0},
+        ]
+    return {"positions": rows, "source": source}
 
 
 @app.get("/api/stats")
 async def get_stats():
     rows = await db_get_positions()
-    if not rows:
-        positions = MOCK_POSITIONS
-        closed = MOCK_CLOSED
-    else:
-        positions = [r for r in rows if not r.get("closed")]
-        closed = [r for r in rows if r.get("closed")]
-
-    open_pnl = sum(
-        (p["current_price"] - p["entry_price"]) / p["entry_price"] * p["size_usd"]
-        for p in positions
-        if p.get("entry_price", 0) > 0
-    )
-    total_invested = sum(p["size_usd"] for p in positions)
-
-    wins = [
-        p for p in closed
-        if p.get("exit_price", 0) > p.get("entry_price", 0)
-    ]
-    win_rate = len(wins) / len(closed) if closed else 0.0
-
-    realized_pnl = sum(
-        (p.get("exit_price", 0) - p.get("entry_price", 0)) / p.get("entry_price", 1) * p["size_usd"]
-        for p in closed
-        if p.get("entry_price", 0) > 0
-    )
-
-    # XP: 10 per trade, 50 bonus per win
-    xp = len(closed) * 10 + len(wins) * 50 + max(0, int(realized_pnl))
-
+    if rows:
+        open_pos  = [r for r in rows if not r.get("closed")]
+        closed_pos = [r for r in rows if r.get("closed")]
+        open_pnl = sum(
+            (r["current_price"] - r["entry_price"]) / r["entry_price"] * r["size_usd"]
+            for r in open_pos if r.get("entry_price", 0) > 0
+        )
+        wins = [r for r in closed_pos if r.get("exit_price", 0) > r.get("entry_price", 0)]
+        realized = sum(
+            (r.get("exit_price", 0) - r.get("entry_price", 0)) / r.get("entry_price", 1) * r["size_usd"]
+            for r in closed_pos if r.get("entry_price", 0) > 0
+        )
+        xp = len(closed_pos) * 10 + len(wins) * 50 + max(0, int(realized))
+        return {
+            "open_positions": len(open_pos),
+            "total_invested": round(sum(r["size_usd"] for r in open_pos), 2),
+            "unrealized_pnl": round(open_pnl, 2),
+            "realized_pnl": round(realized, 2),
+            "total_trades": len(closed_pos),
+            "win_rate": round(len(wins) / len(closed_pos), 4) if closed_pos else 0.0,
+            "wins": len(wins),
+            "losses": len(closed_pos) - len(wins),
+            "xp": xp,
+            "streak": min(len(wins), 7),
+            "source": "live",
+        }
+    # Mock stats while bot hasn't traded yet
     return {
-        "open_positions": len(positions),
-        "total_invested": round(total_invested, 2),
-        "unrealized_pnl": round(open_pnl, 2),
-        "realized_pnl": round(realized_pnl, 2),
-        "total_trades": len(closed),
-        "win_rate": round(win_rate, 4),
-        "wins": len(wins),
-        "losses": len(closed) - len(wins),
-        "xp": xp,
-        "streak": min(len(wins), 7),  # simplified
+        "open_positions": 3, "total_invested": 270.0,
+        "unrealized_pnl": 38.52, "realized_pnl": 75.74,
+        "total_trades": 3, "win_rate": 0.667,
+        "wins": 2, "losses": 1, "xp": 205, "streak": 2,
+        "source": "mock",
     }
 
 
 @app.get("/api/markets")
 async def get_markets():
-    return {"markets": MOCK_MARKETS}
+    markets = await fetch_real_markets()
+    return {"markets": markets, "source": "live" if _market_cache_ts > 0 else "mock"}
 
 
 @app.get("/api/feed")
 async def get_feed():
-    return {"feed": sorted(MOCK_FEED, key=lambda x: x["time"], reverse=True)}
+    return {"feed": [
+        {"type": "scan", "text": "Bot started — scanning real markets",
+         "detail": "Connecting to Polymarket CLOB API…", "time": time.time() - 30},
+    ]}
 
 
 @app.get("/api/pnl_history")
 async def get_pnl_history():
-    """Generate a 7-day P&L history for the chart."""
+    rows = await db_get_positions()
+    if rows:
+        closed = [r for r in rows if r.get("closed") and r.get("exit_price", 0) > 0]
+        closed.sort(key=lambda r: r["timestamp"])
+        points, pnl = [], 0.0
+        for r in closed:
+            pnl += (r["exit_price"] - r["entry_price"]) / r["entry_price"] * r["size_usd"]
+            points.append({"ts": r["timestamp"], "pnl": round(pnl, 2), "label": "trade"})
+        if points:
+            return {"history": points}
+
+    # Flat line until real trades happen
     now = time.time()
-    day = 86400
-    points = []
-    pnl = 0.0
-    for i in range(7, -1, -1):
-        ts = now - i * day
-        delta = random.gauss(4, 12)
-        pnl += delta
-        points.append({"ts": ts, "pnl": round(pnl, 2), "label": f"-{i}d" if i > 0 else "now"})
-    return {"history": points}
+    return {"history": [
+        {"ts": now - 86400 * i, "pnl": 0.0, "label": f"-{i}d"} for i in range(7, -1, -1)
+    ]}
 
 
 # ---------------------------------------------------------------------------
@@ -285,7 +329,7 @@ async def websocket_endpoint(ws: WebSocket):
 
 
 # ---------------------------------------------------------------------------
-# Serve React SPA (must be last)
+# Serve React SPA
 # ---------------------------------------------------------------------------
 if FRONTEND_DIST.exists():
     app.mount("/assets", StaticFiles(directory=str(FRONTEND_DIST / "assets")), name="assets")

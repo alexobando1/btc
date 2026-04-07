@@ -1,0 +1,185 @@
+"""
+Layer 4 – Execution
+Places GTC (Good Till Cancelled) orders on Polymarket via py-clob-client.
+Checks on-chain USDC balance before every trade.
+Enforces max slippage.
+"""
+from __future__ import annotations
+
+import asyncio
+import time
+from dataclasses import dataclass
+from typing import Optional
+
+from py_clob_client.client import ClobClient
+from py_clob_client.clob_types import ApiCreds, OrderArgs, OrderType
+from web3 import Web3
+
+from bot.logger import setup_logger
+from bot.math_engine import TradeDecision
+from bot.position_tracker import Position, PositionTracker
+from bot.scanner import Market
+from config import config
+
+logger = setup_logger(__name__)
+
+# Minimal ERC-20 ABI for balanceOf
+_ERC20_ABI = [
+    {
+        "constant": True,
+        "inputs": [{"name": "_owner", "type": "address"}],
+        "name": "balanceOf",
+        "outputs": [{"name": "balance", "type": "uint256"}],
+        "type": "function",
+    }
+]
+
+
+class Executor:
+    def __init__(self, tracker: PositionTracker) -> None:
+        self._tracker = tracker
+        self._w3 = Web3(Web3.HTTPProvider(config.POLYGON_RPC_URL))
+        self._usdc = self._w3.eth.contract(
+            address=Web3.to_checksum_address(config.USDC_CONTRACT),
+            abi=_ERC20_ABI,
+        )
+
+        creds = None
+        if config.POLYMARKET_API_KEY:
+            creds = ApiCreds(
+                api_key=config.POLYMARKET_API_KEY,
+                api_secret=config.POLYMARKET_API_SECRET,
+                api_passphrase=config.POLYMARKET_API_PASSPHRASE,
+            )
+        self._clob = ClobClient(
+            host="https://clob.polymarket.com",
+            chain_id=137,
+            key=config.POLYMARKET_PRIVATE_KEY,
+            creds=creds,
+        )
+        self._wallet = self._derive_address()
+        logger.info("Executor initialised (wallet: %s)", self._wallet)
+
+    def _derive_address(self) -> str:
+        try:
+            account = self._w3.eth.account.from_key(config.POLYMARKET_PRIVATE_KEY)
+            return account.address
+        except Exception:
+            return "0x0000000000000000000000000000000000000000"
+
+    async def get_usdc_balance(self) -> float:
+        """Return on-chain USDC.e balance in USD (6 decimals)."""
+        loop = asyncio.get_event_loop()
+        try:
+            raw = await loop.run_in_executor(
+                None,
+                lambda: self._usdc.functions.balanceOf(
+                    Web3.to_checksum_address(self._wallet)
+                ).call(),
+            )
+            return raw / 1e6
+        except Exception as exc:
+            logger.error("Balance check failed: %s", exc)
+            return 0.0
+
+    async def execute_trade(
+        self,
+        market: Market,
+        decision: TradeDecision,
+    ) -> Optional[Position]:
+        """
+        Full pre-trade checklist then place a GTC limit order.
+        Returns the opened Position, or None on failure.
+        """
+        # 1. Skip if already in this market
+        if await self._tracker.position_exists(market.condition_id):
+            logger.info("Already have open position in '%s' – skipping", market.question[:50])
+            return None
+
+        # 2. Slippage guard – spread must be within MAX_SLIPPAGE
+        if market.spread > config.MAX_SLIPPAGE:
+            logger.info(
+                "SKIPPED (spread %.2f%% > %.2f%%): %s",
+                market.spread * 100,
+                config.MAX_SLIPPAGE * 100,
+                market.question[:60],
+            )
+            return None
+
+        # 3. Balance pre-check
+        balance = await self.get_usdc_balance()
+        if balance < decision.position_size_usd:
+            logger.warning(
+                "Insufficient balance $%.2f for trade $%.2f on '%s'",
+                balance,
+                decision.position_size_usd,
+                market.question[:50],
+            )
+            return None
+
+        # 4. Find the correct token
+        token = next(
+            (t for t in market.tokens if t.outcome.upper() == decision.side),
+            None,
+        )
+        if not token:
+            logger.error("Token for side %s not found in market %s", decision.side, market.condition_id)
+            return None
+
+        # 5. Place GTC order
+        order_id = await self._place_gtc_order(
+            token_id=token.token_id,
+            price=decision.market_price,
+            size_usd=decision.position_size_usd,
+            side=decision.side,
+        )
+        if not order_id:
+            return None
+
+        # 6. Record in DB
+        pos = Position(
+            id=None,
+            condition_id=market.condition_id,
+            question=market.question,
+            side=decision.side,
+            token_id=token.token_id,
+            entry_price=decision.market_price,
+            current_price=decision.market_price,
+            size_usd=decision.position_size_usd,
+            order_id=order_id,
+            timestamp=time.time(),
+        )
+        pos.id = await self._tracker.open_position(pos)
+        return pos
+
+    async def _place_gtc_order(
+        self,
+        token_id: str,
+        price: float,
+        size_usd: float,
+        side: str,
+    ) -> Optional[str]:
+        loop = asyncio.get_event_loop()
+        try:
+            # size in shares = USD / price
+            size_shares = size_usd / price if price > 0 else 0
+
+            order_args = OrderArgs(
+                token_id=token_id,
+                price=round(price, 4),
+                size=round(size_shares, 2),
+                side=side,
+            )
+            resp = await loop.run_in_executor(
+                None,
+                lambda: self._clob.create_and_post_order(order_args),
+            )
+            order_id = resp.get("orderID", "") if isinstance(resp, dict) else str(resp)
+            logger.info(
+                "GTC order placed: %s %s @ %.4f, size $%.2f | order_id=%s",
+                side, token_id[:12], price, size_usd, order_id,
+            )
+            return order_id
+        except Exception as exc:
+            logger.error("Order placement failed: %s", exc)
+            return None

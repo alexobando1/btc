@@ -1,0 +1,19 @@
+[Unit]
+Description=Polymarket Automated Trading Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/btc
+ExecStart=/home/ubuntu/btc/.venv/bin/python main.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+# Never let systemd kill it on resource pressure
+OOMScoreAdjust=-500
+
+[Install]
+WantedBy=multi-user.target

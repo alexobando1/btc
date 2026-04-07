@@ -109,6 +109,13 @@ class Executor:
             logger.info("Balance API raw response: %s", result)
             raw_bal = result.get("balance", "0") if isinstance(result, dict) else "0"
             balance = float(raw_bal) / 1e6
+            # If CLOB API returns 0 but we know we have funds, use the override
+            if balance == 0.0 and config.ASSUME_BALANCE_USD > 0:
+                logger.warning(
+                    "CLOB balance=0, using ASSUME_BALANCE_USD=$%.2f override",
+                    config.ASSUME_BALANCE_USD,
+                )
+                balance = config.ASSUME_BALANCE_USD
             logger.info("Polymarket USDC balance: $%.2f (raw: %s)", balance, raw_bal)
             return balance
         except Exception as exc:

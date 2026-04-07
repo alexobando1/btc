@@ -12,6 +12,8 @@ class Config:
     POLYMARKET_PRIVATE_KEY: str = os.getenv("POLYMARKET_PRIVATE_KEY", "")
     # Proxy wallet address shown on polymarket.com profile (e.g. 0xF699...)
     POLYMARKET_PROXY_WALLET: str = os.getenv("POLYMARKET_PROXY_WALLET", "")
+    # Override balance if CLOB API returns 0 (set to actual Polymarket cash balance)
+    ASSUME_BALANCE_USD: float = float(os.getenv("ASSUME_BALANCE_USD", "0"))
 
     # Polygon
     POLYGON_RPC_URL: str = os.getenv(
@@ -30,7 +32,7 @@ class Config:
     TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
 
     # Trading parameters
-    EV_THRESHOLD: float = float(os.getenv("EV_THRESHOLD", "0.05"))
+    EV_THRESHOLD: float = float(os.getenv("EV_THRESHOLD", "0.03"))
     KELLY_FRACTION: float = float(os.getenv("KELLY_FRACTION", "0.25"))
     MAX_SLIPPAGE: float = float(os.getenv("MAX_SLIPPAGE", "0.02"))
     MAX_POSITION_USD: float = float(os.getenv("MAX_POSITION_USD", "200"))

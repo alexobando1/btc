@@ -74,10 +74,15 @@ async def run_scan_cycle(
     edges_found = 0
     trades_placed = 0
 
-    # Limit to top 25 markets by volume to stay within API rate limits
-    # (Anthropic free tier = 5 req/min; we send ~4/min with rate limiting)
-    markets_to_analyse = sorted(markets, key=lambda m: m.volume, reverse=True)[:25]
-    logger.info("Analysing top %d markets (of %d total) by volume", len(markets_to_analyse), len(markets))
+    # Filter to markets with uncertain prices (5%-95%) — skip near-certain outcomes
+    # like "Will LeBron win presidency? YES $0.01" — no edge possible there
+    uncertain = [m for m in markets if 0.05 <= m.yes_price <= 0.95 and 0.05 <= m.no_price <= 0.95]
+    # Sort by spread (tightest spread = most liquid) then take top 25
+    markets_to_analyse = sorted(uncertain, key=lambda m: m.spread)[:25]
+    logger.info(
+        "Analysing top %d uncertain markets (of %d total, %d filtered out as near-certain)",
+        len(markets_to_analyse), len(markets), len(markets) - len(uncertain),
+    )
 
     # Analyse sequentially to respect rate limits
     semaphore = asyncio.Semaphore(1)

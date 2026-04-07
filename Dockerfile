@@ -1,14 +1,18 @@
-FROM python:3.11-slim
+FROM python:3.11
 
 WORKDIR /app
 
-# ── 1. Python deps (pure Python only, no compilation) ─────────────────────
+# ── 1. Python deps ─────────────────────────────────────────────────────────
+# Dashboard API deps (pure Python, fast)
 COPY requirements-api.txt ./
 RUN pip install --no-cache-dir -r requirements-api.txt
 
-# ── 2. Node.js (install, build frontend, then remove) ─────────────────────
-RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
-    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+# Bot deps (needs gcc/Rust — python:3.11 full image has them)
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+
+# ── 2. Node.js → build React frontend → remove Node ───────────────────────
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
@@ -16,16 +20,19 @@ COPY frontend/package*.json ./frontend/
 RUN cd frontend && npm ci
 
 COPY frontend/ ./frontend/
-RUN cd frontend && npm run build
-
-# Remove Node + node_modules to free space
-RUN apt-get purge -y nodejs && apt-get autoremove -y && rm -rf frontend/node_modules
+RUN cd frontend && npm run build \
+    && rm -rf node_modules
 
 # ── 3. App source ──────────────────────────────────────────────────────────
-COPY api/      ./api/
-COPY config.py ./
+COPY bot/       ./bot/
+COPY api/       ./api/
+COPY prompts/   ./prompts/
+COPY config.py  ./
+COPY main.py    ./
+COPY start.sh   ./
+RUN chmod +x start.sh
 
 ENV PORT=8000
 EXPOSE $PORT
 
-CMD ["sh", "-c", "uvicorn api.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+CMD ["./start.sh"]

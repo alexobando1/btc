@@ -1,11 +1,12 @@
 """
 Layer 1 – Data & Market Access
-Fetches active markets directly from Polymarket CLOB REST API via httpx.
-Uses cursor-based pagination to get all markets.
+Uses Polymarket Gamma API for market data (includes live prices + volume).
+Uses CLOB client only for order placement.
 """
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -18,7 +19,8 @@ from config import config
 
 logger = setup_logger(__name__)
 
-CLOB_HOST = "https://clob.polymarket.com"
+CLOB_HOST  = "https://clob.polymarket.com"
+GAMMA_URL  = "https://gamma-api.polymarket.com"
 
 
 @dataclass
@@ -53,57 +55,57 @@ class MarketScanner:
                 api_passphrase=config.POLYMARKET_API_PASSPHRASE,
             )
         self._clob = ClobClient(
-            host=CLOB_HOST,
-            chain_id=137,
+            host=CLOB_HOST, chain_id=137,
             key=config.POLYMARKET_PRIVATE_KEY or None,
             creds=creds,
         )
-        logger.info("MarketScanner initialised (CLOB host: %s)", CLOB_HOST)
+        logger.info("MarketScanner initialised (Gamma API + CLOB)")
 
     async def fetch_markets(self, min_volume: float = config.MIN_MARKET_VOLUME) -> list[Market]:
-        """Return active binary markets above *min_volume* USD using direct REST calls."""
-        logger.info("Fetching active markets (min volume $%.0f)…", min_volume)
-
-        raw_markets = await self._fetch_all_pages()
-        logger.info("Raw markets fetched from CLOB: %d", len(raw_markets))
+        logger.info("Fetching markets from Gamma API (min volume $%.0f)…", min_volume)
+        raw = await self._fetch_gamma_markets()
+        logger.info("Gamma API returned %d total markets", len(raw))
 
         markets: list[Market] = []
-        for raw in raw_markets:
+        for m in raw:
             try:
-                volume = float(raw.get("volume", 0) or 0)
+                volume = float(m.get("volume") or m.get("volumeNum") or 0)
                 if volume < min_volume:
                     continue
-
-                tokens = raw.get("tokens", [])
-                if len(tokens) < 2:
+                if not m.get("active") or m.get("closed"):
                     continue
 
-                market_tokens = [
-                    MarketToken(
-                        token_id=t["token_id"],
-                        outcome=t["outcome"],
-                        price=float(t.get("price", 0) or 0),
-                    )
-                    for t in tokens
-                ]
-
-                yes_token = next((t for t in market_tokens if t.outcome.upper() == "YES"), None)
-                no_token  = next((t for t in market_tokens if t.outcome.upper() == "NO"),  None)
-
-                if not yes_token or not no_token:
+                # outcomePrices is a JSON-encoded string like '["0.42","0.58"]'
+                raw_prices = m.get("outcomePrices", "[]")
+                prices = json.loads(raw_prices) if isinstance(raw_prices, str) else raw_prices
+                if len(prices) < 2:
                     continue
-                if yes_token.price <= 0 or no_token.price <= 0:
+                yes_price = float(prices[0])
+                no_price  = float(prices[1])
+                if yes_price <= 0 or no_price <= 0:
                     continue
 
-                spread = abs(yes_token.price + no_token.price - 1.0)
+                # clobTokenIds is a JSON-encoded string of token IDs
+                raw_ids = m.get("clobTokenIds", "[]")
+                token_ids = json.loads(raw_ids) if isinstance(raw_ids, str) else raw_ids
 
+                outcomes_raw = m.get("outcomes", '["Yes","No"]')
+                outcomes = json.loads(outcomes_raw) if isinstance(outcomes_raw, str) else outcomes_raw
+
+                tokens = []
+                for i, tid in enumerate(token_ids[:2]):
+                    outcome = outcomes[i] if i < len(outcomes) else ("YES" if i == 0 else "NO")
+                    price   = yes_price if i == 0 else no_price
+                    tokens.append(MarketToken(token_id=str(tid), outcome=outcome.upper(), price=price))
+
+                spread = abs(yes_price + no_price - 1.0)
                 markets.append(Market(
-                    condition_id=raw.get("condition_id", ""),
-                    question=raw.get("question", ""),
+                    condition_id=m.get("conditionId", m.get("condition_id", "")),
+                    question=m.get("question", ""),
                     volume=volume,
-                    tokens=market_tokens,
-                    yes_price=yes_token.price,
-                    no_price=no_token.price,
+                    tokens=tokens,
+                    yes_price=yes_price,
+                    no_price=no_price,
                     spread=spread,
                 ))
             except Exception as exc:
@@ -113,43 +115,37 @@ class MarketScanner:
         logger.info("Loaded %d qualifying markets", len(markets))
         return markets
 
-    async def _fetch_all_pages(self) -> list[dict]:
-        """Paginate through CLOB /markets using cursor until exhausted."""
+    async def _fetch_gamma_markets(self) -> list[dict]:
+        """Fetch active binary markets from Gamma API with pagination."""
         all_markets: list[dict] = []
-        cursor = "MA=="   # base64("0") — starting cursor for Polymarket pagination
-        max_pages = 10
-
+        offset = 0
+        limit  = 100
         async with httpx.AsyncClient(timeout=30) as client:
-            for page in range(max_pages):
+            for _ in range(20):  # max 2000 markets
                 try:
                     resp = await client.get(
-                        f"{CLOB_HOST}/markets",
-                        params={"next_cursor": cursor},
+                        f"{GAMMA_URL}/markets",
+                        params={"active": "true", "closed": "false",
+                                "limit": limit, "offset": offset},
                     )
                     resp.raise_for_status()
-                    data = resp.json()
-
-                    page_markets = data.get("data", [])
-                    all_markets.extend(page_markets)
-                    logger.info("CLOB page %d: %d markets", page + 1, len(page_markets))
-
-                    next_cursor = data.get("next_cursor", "")
-                    # LTE== is the sentinel "end of results" cursor
-                    if not next_cursor or next_cursor in ("", "LTE=", cursor):
+                    batch = resp.json()
+                    if not batch:
                         break
-                    cursor = next_cursor
+                    all_markets.extend(batch)
+                    logger.info("Gamma page offset=%d: %d markets", offset, len(batch))
+                    if len(batch) < limit:
+                        break
+                    offset += limit
                 except Exception as exc:
-                    logger.error("CLOB page fetch error (page %d): %s", page + 1, exc)
+                    logger.error("Gamma API page error (offset=%d): %s", offset, exc)
                     break
-
         return all_markets
 
     async def get_orderbook(self, token_id: str) -> Optional[dict]:
+        loop = asyncio.get_event_loop()
         try:
-            loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(
-                None, lambda: self._clob.get_order_book(token_id)
-            )
+            return await loop.run_in_executor(None, lambda: self._clob.get_order_book(token_id))
         except Exception as exc:
-            logger.warning("Orderbook fetch failed for %s: %s", token_id, exc)
+            logger.warning("Orderbook fetch failed %s: %s", token_id, exc)
             return None

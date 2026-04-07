@@ -70,9 +70,13 @@ export default function App() {
       {/* Header */}
       <Header
         stats={bot.stats}
+        balance={bot.balance}
         connected={bot.connected}
         scanning={bot.scanning}
         scanProgress={bot.scanProgress}
+        botRunning={bot.botRunning}
+        onStop={bot.emergencyStop}
+        onResume={bot.resumeBot}
       />
 
       {/* Main grid */}

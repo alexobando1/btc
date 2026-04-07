@@ -160,8 +160,16 @@ async def main() -> None:
     # Start Telegram polling as a background task
     polling_task = asyncio.create_task(monitor.start_polling())
 
+    STOP_FILE = "/tmp/polybot_stop"
+
     try:
         while True:
+            # Emergency stop check
+            if __import__("pathlib").Path(STOP_FILE).exists():
+                logger.info("EMERGENCY STOP active — bot paused. Delete %s to resume.", STOP_FILE)
+                await asyncio.sleep(10)
+                continue
+
             try:
                 await run_scan_cycle(scanner, analyzer, executor, tracker, monitor)
             except Exception as exc:
@@ -169,7 +177,11 @@ async def main() -> None:
                 await monitor.alert_error("scan cycle", exc)
 
             logger.info("Sleeping %ds until next scan…", config.SCAN_INTERVAL_SECONDS)
-            await asyncio.sleep(config.SCAN_INTERVAL_SECONDS)
+            # Sleep in 5s chunks so stop signal is detected quickly
+            for _ in range(config.SCAN_INTERVAL_SECONDS // 5):
+                if __import__("pathlib").Path(STOP_FILE).exists():
+                    break
+                await asyncio.sleep(5)
     except KeyboardInterrupt:
         logger.info("Shutdown requested")
     finally:

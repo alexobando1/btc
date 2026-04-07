@@ -9,6 +9,7 @@ import logging
 import os
 import random
 import time
+from json import loads as json_loads
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -19,13 +20,20 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from web3 import Web3
 
 logger = logging.getLogger("api")
 logging.basicConfig(level=logging.INFO)
 
 DB_PATH = os.getenv("DB_PATH", "positions.db")
 FRONTEND_DIST = Path(__file__).parent.parent / "frontend" / "dist"
-CLOB_URL = "https://clob.polymarket.com"
+CLOB_URL  = "https://clob.polymarket.com"
+GAMMA_URL = "https://gamma-api.polymarket.com"
+STOP_FILE = Path("/tmp/polybot_stop")
+USDC_CONTRACT = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+_ERC20_ABI = [{"constant": True, "inputs": [{"name": "_owner", "type": "address"}],
+               "name": "balanceOf", "outputs": [{"name": "balance", "type": "uint256"}],
+               "type": "function"}]
 
 _market_cache: list[dict] = []
 _market_cache_ts: float = 0
@@ -39,41 +47,51 @@ async def fetch_real_markets() -> list[dict]:
     logger.info("Fetching markets from Polymarket CLOB…")
     try:
         all_raw: list[dict] = []
-        cursor = "MA=="
+        offset, limit = 0, 100
         async with httpx.AsyncClient(timeout=30) as client:
-            for _ in range(10):
-                resp = await client.get(f"{CLOB_URL}/markets", params={"next_cursor": cursor})
+            for _ in range(20):
+                resp = await client.get(
+                    f"{GAMMA_URL}/markets",
+                    params={"active": "true", "closed": "false", "limit": limit, "offset": offset},
+                )
                 resp.raise_for_status()
-                body = resp.json()
-                all_raw.extend(body.get("data", []))
-                next_cur = body.get("next_cursor", "")
-                if not next_cur or next_cur in ("", "LTE=", cursor):
+                batch = resp.json()
+                if not batch:
                     break
-                cursor = next_cur
+                all_raw.extend(batch)
+                if len(batch) < limit:
+                    break
+                offset += limit
         raw = all_raw
         processed: list[dict] = []
         for m in raw:
-            tokens = m.get("tokens", [])
-            yes_t = next((t for t in tokens if str(t.get("outcome", "")).upper() == "YES"), None)
-            no_t  = next((t for t in tokens if str(t.get("outcome", "")).upper() == "NO"),  None)
-            if not yes_t or not no_t:
+            try:
+                if not m.get("active") or m.get("closed"):
+                    continue
+                volume = float(m.get("volume") or m.get("volumeNum") or 0)
+                if volume < 5_000:
+                    continue
+                raw_prices = m.get("outcomePrices", "[]")
+                prices = json.loads(raw_prices) if isinstance(raw_prices, str) else raw_prices
+                if len(prices) < 2:
+                    continue
+                yes_price = float(prices[0])
+                no_price  = float(prices[1])
+                if yes_price <= 0 or no_price <= 0:
+                    continue
+                edge = abs(yes_price - 0.5) * 0.4
+                processed.append({
+                    "question":     m.get("question", ""),
+                    "yes_price":    round(yes_price, 4),
+                    "no_price":     round(no_price, 4),
+                    "volume":       volume,
+                    "ev":           round(edge, 3),
+                    "ai_prob":      round(yes_price, 3),
+                    "confidence":   "medium",
+                    "condition_id": m.get("conditionId", m.get("condition_id", "")),
+                })
+            except Exception:
                 continue
-            yes_price = float(yes_t.get("price") or 0)
-            no_price  = float(no_t.get("price") or 0)
-            volume    = float(m.get("volume") or 0)
-            if volume < 5_000 or yes_price <= 0 or no_price <= 0:
-                continue
-            edge = abs(yes_price - 0.5) * 0.4
-            processed.append({
-                "question":     m.get("question", ""),
-                "yes_price":    round(yes_price, 4),
-                "no_price":     round(no_price, 4),
-                "volume":       volume,
-                "ev":           round(edge, 3),
-                "ai_prob":      round(yes_price, 3),
-                "confidence":   "medium",
-                "condition_id": m.get("condition_id", ""),
-            })
         processed.sort(key=lambda x: x["volume"], reverse=True)
         _market_cache = processed[:60]
         _market_cache_ts = time.time()
@@ -223,6 +241,52 @@ async def get_pnl_history():
         now = time.time()
         points = [{"ts": now - 86400 * i, "pnl": 0.0, "label": f"-{i}d"} for i in range(7, -1, -1)]
     return {"history": points}
+
+
+@app.get("/api/balance")
+async def get_balance():
+    try:
+        pk = os.getenv("POLYMARKET_PRIVATE_KEY", "")
+        rpc = os.getenv("POLYGON_RPC_URL", "https://polygon-rpc.com")
+        if not pk:
+            return {"wallet": "—", "usdc_balance": 0.0, "error": "No private key set"}
+        loop = asyncio.get_event_loop()
+        def _read():
+            w3 = Web3(Web3.HTTPProvider(rpc))
+            acct = w3.eth.account.from_key(pk)
+            wallet = acct.address
+            usdc = w3.eth.contract(
+                address=Web3.to_checksum_address(USDC_CONTRACT), abi=_ERC20_ABI
+            )
+            raw = usdc.functions.balanceOf(Web3.to_checksum_address(wallet)).call()
+            return wallet, raw / 1e6
+        wallet, balance = await loop.run_in_executor(None, _read)
+        return {"wallet": wallet, "usdc_balance": round(balance, 2)}
+    except Exception as exc:
+        logger.warning("Balance fetch failed: %s", exc)
+        return {"wallet": "—", "usdc_balance": 0.0, "error": str(exc)}
+
+
+@app.get("/api/bot_status")
+async def bot_status():
+    return {"running": not STOP_FILE.exists(), "stop_file": str(STOP_FILE)}
+
+
+@app.post("/api/stop")
+async def stop_bot():
+    STOP_FILE.touch()
+    logger.info("EMERGENCY STOP triggered via API")
+    await ws_manager.broadcast({"event": "bot_stopped", "data": {}})
+    return {"status": "stopped"}
+
+
+@app.post("/api/start")
+async def start_bot():
+    if STOP_FILE.exists():
+        STOP_FILE.unlink()
+    logger.info("Bot RESUMED via API")
+    await ws_manager.broadcast({"event": "bot_started", "data": {}})
+    return {"status": "running"}
 
 
 @app.websocket("/ws")

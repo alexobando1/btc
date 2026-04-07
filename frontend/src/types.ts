@@ -47,6 +47,12 @@ export interface PnLPoint {
 }
 
 export interface WSEvent {
-  event: 'market_analysed' | 'scan_complete' | 'trade_executed'
+  event: 'market_analysed' | 'scan_complete' | 'trade_executed' | 'bot_stopped' | 'bot_started'
   data: Record<string, unknown>
+}
+
+export interface WalletBalance {
+  wallet: string
+  usdc_balance: number
+  error?: string
 }

@@ -247,14 +247,30 @@ async def get_pnl_history():
 async def get_balance():
     try:
         pk = os.getenv("POLYMARKET_PRIVATE_KEY", "")
-        rpc = os.getenv("POLYGON_RPC_URL", "https://polygon-rpc.com")
+        api_key = os.getenv("POLYMARKET_API_KEY", "")
+        api_secret = os.getenv("POLYMARKET_API_SECRET", "")
+        api_passphrase = os.getenv("POLYMARKET_API_PASSPHRASE", "")
         if not pk:
             return {"wallet": "—", "usdc_balance": 0.0, "error": "No private key set"}
         loop = asyncio.get_event_loop()
         def _read():
-            w3 = Web3(Web3.HTTPProvider(rpc))
+            from py_clob_client.client import ClobClient
+            from py_clob_client.clob_types import ApiCreds, BalanceAllowanceParams, AssetType
+            w3 = Web3(Web3.HTTPProvider("https://polygon-rpc.com"))
             acct = w3.eth.account.from_key(pk)
             wallet = acct.address
+            # Polymarket holds USDC internally — read via CLOB API balance endpoint
+            if api_key and api_secret and api_passphrase:
+                try:
+                    creds = ApiCreds(api_key=api_key, api_secret=api_secret, api_passphrase=api_passphrase)
+                    client = ClobClient(host=CLOB_URL, chain_id=137, key=pk, creds=creds)
+                    result = client.get_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.USDC))
+                    # balance is a string in micro-USDC (6 decimals)
+                    raw_bal = result.get("balance", "0") if isinstance(result, dict) else "0"
+                    return wallet, float(raw_bal) / 1e6
+                except Exception as exc:
+                    logger.warning("CLOB balance failed, falling back to on-chain: %s", exc)
+            # Fallback: read raw USDC from EOA (may be 0 if all funds are deposited)
             usdc = w3.eth.contract(
                 address=Web3.to_checksum_address(USDC_CONTRACT), abi=_ERC20_ABI
             )

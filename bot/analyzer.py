@@ -68,7 +68,14 @@ class MarketAnalyzer:
 
     def _parse(self, raw: str, yes_price: float) -> Optional[Analysis]:
         try:
-            data = json.loads(raw)
+            # Strip markdown code fences that Claude sometimes adds
+            clean = raw.strip()
+            if clean.startswith("```"):
+                lines = clean.split("\n")
+                # Remove first line (```json or ```) and last line (```)
+                inner = lines[1:-1] if lines[-1].strip() == "```" else lines[1:]
+                clean = "\n".join(inner).strip()
+            data = json.loads(clean)
             probability = float(data["probability"])
             # Clamp to valid range
             probability = max(0.01, min(0.99, probability))

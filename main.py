@@ -157,8 +157,8 @@ async def main() -> None:
     monitor = TelegramMonitor(tracker)
     executor = Executor(tracker)
 
-    # Start Telegram polling as a background task
-    polling_task = asyncio.create_task(monitor.start_polling())
+    # NOTE: Telegram polling disabled — bot uses send-only alert mode.
+    # Polling causes TelegramConflictError when multiple instances run on Railway.
 
     STOP_FILE = "/tmp/polybot_stop"
 
@@ -185,7 +185,6 @@ async def main() -> None:
     except KeyboardInterrupt:
         logger.info("Shutdown requested")
     finally:
-        polling_task.cancel()
         await monitor.close()
         logger.info("Bot stopped.")
 

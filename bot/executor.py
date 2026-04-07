@@ -30,21 +30,59 @@ class Executor:
         # Web3 only needed for address derivation (local op, no RPC call)
         self._w3 = Web3()
 
-        creds = None
-        if config.POLYMARKET_API_KEY:
-            creds = ApiCreds(
-                api_key=config.POLYMARKET_API_KEY,
-                api_secret=config.POLYMARKET_API_SECRET,
-                api_passphrase=config.POLYMARKET_API_PASSPHRASE,
-            )
+        # Start with a bare client (no creds) — we'll derive them below
         self._clob = ClobClient(
             host="https://clob.polymarket.com",
             chain_id=137,
             key=config.POLYMARKET_PRIVATE_KEY,
-            creds=creds,
         )
         self._wallet = self._derive_address()
+
+        # Auto-derive CLOB API credentials from private key
+        creds = self._derive_or_create_creds()
+        if creds:
+            self._clob = ClobClient(
+                host="https://clob.polymarket.com",
+                chain_id=137,
+                key=config.POLYMARKET_PRIVATE_KEY,
+                creds=creds,
+            )
+
         logger.info("Executor initialised (wallet: %s)", self._wallet)
+
+    def _derive_or_create_creds(self) -> ApiCreds | None:
+        """Derive CLOB API credentials from the private key.
+
+        This calls the Polymarket CLOB API to create or retrieve existing
+        credentials tied to the wallet. No manual API key management needed.
+        """
+        try:
+            resp = self._clob.create_or_derive_api_creds()
+            # resp may be ApiCreds directly or a dict
+            if isinstance(resp, ApiCreds):
+                logger.info("CLOB API credentials derived successfully")
+                return resp
+            if isinstance(resp, dict):
+                creds = ApiCreds(
+                    api_key=resp.get("apiKey", resp.get("api_key", "")),
+                    api_secret=resp.get("secret", resp.get("api_secret", "")),
+                    api_passphrase=resp.get("passphrase", resp.get("api_passphrase", "")),
+                )
+                logger.info("CLOB API credentials derived successfully (api_key: %s…)", creds.api_key[:12])
+                return creds
+            logger.warning("Unexpected creds response type: %s", type(resp))
+            return None
+        except Exception as exc:
+            logger.error("Failed to derive CLOB API credentials: %s", exc)
+            # Fall back to env var creds if derivation fails
+            if config.POLYMARKET_API_KEY:
+                logger.info("Falling back to env var CLOB credentials")
+                return ApiCreds(
+                    api_key=config.POLYMARKET_API_KEY,
+                    api_secret=config.POLYMARKET_API_SECRET,
+                    api_passphrase=config.POLYMARKET_API_PASSPHRASE,
+                )
+            return None
 
     def _derive_address(self) -> str:
         try:

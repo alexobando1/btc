@@ -247,9 +247,6 @@ async def get_pnl_history():
 async def get_balance():
     try:
         pk = os.getenv("POLYMARKET_PRIVATE_KEY", "")
-        api_key = os.getenv("POLYMARKET_API_KEY", "")
-        api_secret = os.getenv("POLYMARKET_API_SECRET", "")
-        api_passphrase = os.getenv("POLYMARKET_API_PASSPHRASE", "")
         if not pk:
             return {"wallet": "—", "usdc_balance": 0.0, "error": "No private key set"}
         loop = asyncio.get_event_loop()
@@ -260,14 +257,23 @@ async def get_balance():
             w3 = Web3()
             acct = w3.eth.account.from_key(pk)
             wallet = acct.address
-            # Polymarket holds USDC internally — read via CLOB API balance endpoint
-            if api_key and api_secret and api_passphrase:
-                creds = ApiCreds(api_key=api_key, api_secret=api_secret, api_passphrase=api_passphrase)
-                client = ClobClient(host=CLOB_URL, chain_id=137, key=pk, creds=creds)
-                result = client.get_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
-                raw_bal = result.get("balance", "0") if isinstance(result, dict) else "0"
-                return wallet, float(raw_bal) / 1e6
-            return wallet, 0.0
+            # Auto-derive CLOB API credentials from private key
+            bare_client = ClobClient(host=CLOB_URL, chain_id=137, key=pk)
+            resp = bare_client.create_or_derive_api_creds()
+            if isinstance(resp, ApiCreds):
+                creds = resp
+            elif isinstance(resp, dict):
+                creds = ApiCreds(
+                    api_key=resp.get("apiKey", resp.get("api_key", "")),
+                    api_secret=resp.get("secret", resp.get("api_secret", "")),
+                    api_passphrase=resp.get("passphrase", resp.get("api_passphrase", "")),
+                )
+            else:
+                return wallet, 0.0
+            client = ClobClient(host=CLOB_URL, chain_id=137, key=pk, creds=creds)
+            result = client.get_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
+            raw_bal = result.get("balance", "0") if isinstance(result, dict) else "0"
+            return wallet, float(raw_bal) / 1e6
         wallet, balance = await loop.run_in_executor(None, _read)
         return {"wallet": wallet, "usdc_balance": round(balance, 2)}
     except Exception as exc:

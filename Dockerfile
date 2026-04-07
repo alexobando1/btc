@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
     && rm -rf /var/lib/apt/lists/*
 
 COPY frontend/package*.json ./frontend/
-RUN cd frontend && npm ci --prefer-offline
+RUN cd frontend && npm ci
 
 COPY frontend/ ./frontend/
 RUN cd frontend && npm run build

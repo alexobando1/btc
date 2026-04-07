@@ -10,6 +10,8 @@ class Config:
     POLYMARKET_API_SECRET: str = os.getenv("POLYMARKET_API_SECRET", "")
     POLYMARKET_API_PASSPHRASE: str = os.getenv("POLYMARKET_API_PASSPHRASE", "")
     POLYMARKET_PRIVATE_KEY: str = os.getenv("POLYMARKET_PRIVATE_KEY", "")
+    # Proxy wallet address shown on polymarket.com profile (e.g. 0xF699...)
+    POLYMARKET_PROXY_WALLET: str = os.getenv("POLYMARKET_PROXY_WALLET", "")
 
     # Polygon
     POLYGON_RPC_URL: str = os.getenv(

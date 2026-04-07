@@ -258,11 +258,12 @@ async def get_balance():
             acct = w3.eth.account.from_key(pk)
             wallet = acct.address
             # Auto-derive CLOB API credentials from private key
-            # signature_type=1 (POLY_PROXY) to access proxy wallet balance
+            # signature_type=1 + funder=proxy_wallet to access proxy balance
             POLY_PROXY = 1
-            bare_client = ClobClient(host=CLOB_URL, chain_id=137, key=pk, signature_type=POLY_PROXY)
+            proxy = os.getenv("POLYMARKET_PROXY_WALLET") or None
+            bare_client = ClobClient(host=CLOB_URL, chain_id=137, key=pk, signature_type=POLY_PROXY, funder=proxy)
             creds = bare_client.create_or_derive_api_creds()
-            client = ClobClient(host=CLOB_URL, chain_id=137, key=pk, creds=creds, signature_type=POLY_PROXY)
+            client = ClobClient(host=CLOB_URL, chain_id=137, key=pk, creds=creds, signature_type=POLY_PROXY, funder=proxy)
             result = client.get_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
             raw_bal = result.get("balance", "0") if isinstance(result, dict) else "0"
             return wallet, float(raw_bal) / 1e6
